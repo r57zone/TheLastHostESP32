@@ -17,7 +17,7 @@ WiFi точка доступа, с веб-сервером статичных с
 * Исправление багов с названиями (URL кодировки вероятно);
 
 ## Схема подключения
-![Схема подключения](https://github.com/user-attachments/assets/a754e69c-4009-493f-9464-daec8abb054d)
+![](https://github.com/user-attachments/assets/8c268a58-0b21-450a-8693-86e3dcd92cc3)
 
 ## Прошивка
 1. Установить [Arduino IDE](https://www.arduino.cc/en/software/).

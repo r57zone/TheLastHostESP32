@@ -18,7 +18,7 @@ WiFi access point with a static site web server, HTTP/HTTPS page emulation, and 
 * Fixing bugs with names (probably URL encoding issues);
 
 ## Wiring Diagram
-https://github.com/user-attachments/assets/a754e69c-4009-493f-9464-daec8abb054d
+![](https://github.com/user-attachments/assets/8c268a58-0b21-450a-8693-86e3dcd92cc3)
 
 ## Firmware
 1. Install [Arduino IDE](https://www.arduino.cc/en/software).
