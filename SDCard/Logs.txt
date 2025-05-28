@@ -1,0 +1,20 @@
+Host: connectivitycheck.gstatic.com, Method: GET, Uptime: 16580
+URL: connectivitycheck.gstatic.com/generate_204
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36
+
+Host: www.google.com, Method: GET, Uptime: 16604
+URL: www.google.com/
+User-Agent: Dalvik/2.1.0 (Linux; U; Android 13; Build/UP1A.231005.007)
+
+Host: connectivitycheck.gstatic.com, Method: GET, Uptime: 17666
+URL: connectivitycheck.gstatic.com/generate_204
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36
+
+Host: connectivitycheck.gstatic.com, Method: GET, Uptime: 19854
+URL: connectivitycheck.gstatic.com/generate_204
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36
+
+Host: sdcard.local, Method: GET, Uptime: 22970
+URL: sdcard.local/
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36
+

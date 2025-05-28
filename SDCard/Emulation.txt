@@ -1,0 +1,9 @@
+connectivitycheck.gstatic.com/generate_204 | 204 | text/plain | -
+msftconnecttest.com/connecttest.txt | 200 | text/plain | "Microsoft Connect Test"
+test.ru | 200 | text/plain | "Test\n1\n2"
+test.ru/file | 200 | text/plain | /Emulation/file.txt
+test.ru/json | 200 | application/json | /Emulation/json.txt
+site.ru | 200 | image/jpeg | /site1/1.jpg
+site.ru/1.jpg | 200 | image/jpeg | /site1/1.jpg
+site.ru/1.mp3 | 200 | audio/mpeg | /1.mp3
+site.ru/2.mp3 | 200 | application/octet-stream | /1.mp3

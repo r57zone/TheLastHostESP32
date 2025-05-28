@@ -1,0 +1,6 @@
+sdcard.local /
+google.ru /site3/
+test.ru /site4/
+site1.ru /site1/
+site2.ru /site2/
+site3.ru /site3/
