@@ -28,7 +28,7 @@ Wi-Fi access point with a static site web server, http/https page emulation, and
 5. Flash the [sketch](https://github.com/r57zone/TheLastHostESP32/archive/refs/heads/master.zip).
 6. Format the SD card to FAT32 using [Rufus](https://github.com/pbatard/rufus/releases/) or another utility, and extract the contents of the `SDCard` folder to SD card.
 7. Connect to the Wi-Fi network `TheLastHost` with the password `12345678` and go to `http://i.me` or `http://192.168.4.1`.  
-8. Edit the configuration files: Setup.ini, Hosts.txt, Emulation.txt  
+8. Edit the configuration files: `Setup.ini`, `Hosts.txt`, `Emulation.txt`.  
 
 ## Web interface
 ![WebUI](https://github.com/user-attachments/assets/29f5a7c1-a3f6-4d6f-bcdb-e06a9b94ddca)
