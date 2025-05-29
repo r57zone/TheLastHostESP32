@@ -3,7 +3,7 @@
 ← Choose language | Выберите язык
 
 # The Last Host (ESP32 C3 Mini + SD Adapter)
-Wi-Fi access point with a static site web server, http/https page emulation, and file operations on the SD card.
+Wi-Fi access point with a static site web server, http/https page emulation, and file operations on the SD card. Host static websites, emulate basic authentication, various services, and simple APIs, and share files across different devices within a dedicated Wi-Fi network.
 
 ## Features
 * Wi-Fi access point mode; SSID and password can be changed in the file `Setup.ini` on the SD card;
