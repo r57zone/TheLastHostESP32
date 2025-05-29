@@ -10,7 +10,7 @@ Wi-Fi access point with a static site web server, http/https page emulation, and
 * Static site web server with support for any domains. Domains and folders are listed in the file `Hosts.txt`. To open the domain as a website rather than a folder of files, place the `index.html` file in the root directory;
 * Emulation of individual http/https web pages, sites. Specify in the file `Emulation.txt` the list of pages, URLs, http status codes, response types, and the response itself as a file or string. To get the required values and addresses, use [Wireshark](https://www.wireshark.org/) on Windows and [PCAPdroid](https://github.com/emanuele-f/PCAPdroid) on Android (with Wireshark). Don’t forget to share popular emulations;
 * File management on the SD card: create folders, upload files, and delete them;
-* Logging device requests to the file Logs.txt. To enable it, set the parameter logs to 1 in the Setup.ini file;
+* Logging device requests to the file Logs.txt. To enable it, set the parameter `logs` to `1` in the `Setup.ini` file;
 
 ## Plans
 * Connection to external Wi-Fi networks;
