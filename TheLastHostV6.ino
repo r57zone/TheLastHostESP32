@@ -176,12 +176,15 @@ const char style[] PROGMEM =
   ".name{flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
   ".actions{display:flex;gap:.5em}";
 
-void logRequest(const String &host, const String &request, const String &method, const String &userAgent) {
+void logRequest(const String &host, const String &request, const String &method, const String &userAgent, const String &body) {
     File logFile = SD.open("/Logs.txt", FILE_APPEND);
     if (logFile) {
         logFile.print("Host: " + host + ", Method: " + method + ", Uptime: " + String(millis()) + "\n");
         logFile.print("URL: " + host + request + "\n");
-        logFile.print("User-Agent: " + userAgent + "\n\n");
+        logFile.print("User-Agent: " + userAgent + "\n");
+        if (body.length() > 0)
+            logFile.print("Body:\n" + body + "\n");
+		logFile.print("\n");
         logFile.close();
     }
 }
@@ -551,12 +554,29 @@ void handleUpload(HTTPRequest *req, HTTPResponse *res, String request)
 	res->setHeader("Location", basePath.c_str());
 }
 
+String readRequestBody(HTTPRequest *req) {
+	int len = req->getContentLength();
+	String body = "";
+	if (len > 0) {
+		byte *buf = new byte[len + 1]; // используем byte вместо char
+		int readLen = req->readBytes(buf, len);
+		buf[readLen] = 0; // завершаем строку
+
+		body = String((char*)buf); // приводим к char* при создании строки
+		delete[] buf;
+	}
+	return body;
+}
+
 void handleClient(HTTPRequest * req, HTTPResponse * res) {
 	String protocol = String(req->isSecure() ? "https://" : "http://");
 	String method = String(req->getMethod().c_str());
 	String host = String(req->getHeader("Host").c_str());
 	String request = urlDecode(String(req->getRequestString().c_str()));
 	String userAgent = String(req->getHeader("User-Agent").c_str());
+	String body = "";
+	if (method == "POST" || method == "PUT")
+		body = readRequestBody(req);
 	unsigned long timeout = millis() + 1000;
 
 	host.trim();
@@ -578,7 +598,7 @@ void handleClient(HTTPRequest * req, HTTPResponse * res) {
 	//}
 	
     if (Logs)
-        logRequest(host, request, method, userAgent);
+        logRequest(host, request, method, userAgent, body);
 	
 	// Create a folder / Создание папки
 	int mkDirIndex = request.indexOf("/?mkdir=");
