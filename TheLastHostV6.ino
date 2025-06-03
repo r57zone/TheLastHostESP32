@@ -176,11 +176,11 @@ const char style[] PROGMEM =
   ".name{flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
   ".actions{display:flex;gap:.5em}";
 
-void logRequest(const String &host, const String &request, const String &method, const String &userAgent, const String &body) {
+void logRequest(const String &protocol, const String &host, const String &request, const String &method, const String &userAgent, const String &body) {
     File logFile = SD.open("/Logs.txt", FILE_APPEND);
     if (logFile) {
         logFile.print("Host: " + host + ", Method: " + method + ", Uptime: " + String(millis()) + "\n");
-        logFile.print("URL: " + host + request + "\n");
+        logFile.print("URL: " + protocol + host + request + "\n");
         logFile.print("User-Agent: " + userAgent + "\n");
         if (body.length() > 0)
             logFile.print("Body:\n" + body + "\n");
@@ -598,7 +598,7 @@ void handleClient(HTTPRequest * req, HTTPResponse * res) {
 	//}
 	
     if (Logs)
-        logRequest(host, request, method, userAgent, body);
+        logRequest(protocol, host, request, method, userAgent, body);
 	
 	// Create a folder / Создание папки
 	int mkDirIndex = request.indexOf("/?mkdir=");
