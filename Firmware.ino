@@ -200,11 +200,11 @@ void loadConfig() {
             String key = line.substring(0, sep);
             String val = line.substring(sep + 1);
             key.trim(); val.trim();
-            if (key == "ssid")
+            if (key == "AP_SSID")
                 ssid = val;
-            else if (key == "password")
+            else if (key == "AP_PASSWORD")
                 password = val;
-            else if (key == "logs")
+            else if (key == "ENABLE_LOGS")
                 Logs = val == "1";
         }
     }
@@ -569,6 +569,14 @@ String readRequestBody(HTTPRequest *req) {
 }
 
 void handleClient(HTTPRequest * req, HTTPResponse * res) {
+	if (!sdCardAttached) {
+        res->setStatusCode(200);
+		res->setHeader("Content-Type", "text/html");
+        res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>SD card not found</title><style>");
+		res->print(style);
+		res->println("</style></head><body><h2>SD card not found</h2></body></html>");
+        return;
+	}
 	String protocol = String(req->isSecure() ? "https://" : "http://");
 	String method = String(req->getMethod().c_str());
 	String host = String(req->getHeader("Host").c_str());
@@ -726,6 +734,7 @@ void handleClient(HTTPRequest * req, HTTPResponse * res) {
 		res->println("<br>Request: \"" + request + "\"");
 		res->println("<br>Protocol: " + String(req->isSecure() ? "HTTPS" : "HTTP") + ", go to <a href=\"" + String(req->isSecure() ? "http://" : "https://") + WiFi.softAPIP().toString() + "/\">HTTPS</a>.");
 		res->println("<h2>ESP32</h2><hr>");
+		//res->println("MAC address: " + WiFi.macAddress() + "<br>");
 		res->println("CPU frequency: " + String(ESP.getCpuFreqMHz()) + "MHz<br>");
 		res->println("Ram size: " + bytesToSize(ESP.getHeapSize()) + "<br>");
 		res->println("Free ram: " + bytesToSize(ESP.getFreeHeap()) + "<br>");
@@ -733,7 +742,7 @@ void handleClient(HTTPRequest * req, HTTPResponse * res) {
 		res->println("Sketch size: " + bytesToSize(ESP.getSketchSize()) + "<br>");
 		res->println("Free space available: " + bytesToSize(ESP.getFreeSketchSpace() - ESP.getSketchSize()) + "<br>");
 		if (sdCardAttached) {
-			res->println("SD card Size: " + bytesToSize(SD.cardSize()));
+			res->println("SD card size: " + bytesToSize(SD.cardSize()));
 			res->println("<br>SD card used space: " + bytesToSize(SD.usedBytes()));
 			res->println("<br>SD card free space: " + bytesToSize(SD.totalBytes() - SD.usedBytes()));
 		} else
@@ -775,20 +784,39 @@ void handleHTTPSClient(HTTPRequest * req, HTTPResponse * res) {
 
 void setup() {
 	//Serial.begin(115200); Not working ???
+	delay(1000); // Дайте время на стабилизацию
 
 	SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-	//delay(100);
-	if (!SD.begin(SD_CS)) {
+	delay(500); // Увеличьте задержку
+	
+	int sdAttempts = 0;
+    while (!SD.begin(SD_CS)) {
+        delay(1000);
+        sdAttempts++;
+        if (sdAttempts == 5)
+            break;
+    }
+	
+	if (sdAttempts > 4) {
 		sdCardAttached = false;
-		return;
+		//return;
+	} else {
+		sdCardAttached = true;
+		delay(200);
+		loadConfig();
+		delay(50);
+		loadHosts();
+		delay(50);
+		loadPagesEmulation();
 	}
-	//delay(100);
-	loadConfig();
-	//delay(10);
-	loadHosts();
-	//delay(10);
-	loadPagesEmulation();
+	
+	WiFi.persistent(false);
+	WiFi.setSleep(false);          // стабильность AP
+	WiFi.disconnect(true, true);
+	delay(100);
+	
 	WiFi.softAP(ssid.c_str(), password.c_str());
+	//WiFi.setTxPower(WIFI_POWER_8_5dBm); // Stable working?
 
 	IPAddress myIP = WiFi.softAPIP();
 	dnsServer.start(53, "*", myIP);
