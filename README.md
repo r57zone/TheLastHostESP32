@@ -18,7 +18,8 @@ Wi-Fi access point with a static site web server, http/https page emulation, and
 * Fixing bugs with names (probably URL encoding issues);
 
 ## Wiring Diagram
-![](https://github.com/user-attachments/assets/8c268a58-0b21-450a-8693-86e3dcd92cc3)
+![](https://github.com/user-attachments/assets/c41d410d-3152-41ab-8ba9-f9cbfdb9a491)
+Solder a 16V 47 µF capacitor between 3.3 volts and ground.
 
 ## Firmware
 1. Install [Arduino IDE](https://www.arduino.cc/en/software).
