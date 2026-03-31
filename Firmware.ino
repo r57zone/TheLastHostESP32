@@ -19,6 +19,11 @@
 #include <HTTPBodyParser.hpp>
 #include <HTTPMultipartBodyParser.hpp>
 
+#define PIN_SD_CS   7
+#define PIN_SD_MOSI 6
+#define PIN_SD_MISO 5
+#define PIN_SD_SCK  4
+
 using namespace httpsserver;
 
 // https://github.com/fhessel/esp32_https_server_compat/blob/master/examples/HelloServerSecure/cert.h
@@ -132,105 +137,172 @@ SSLCert cert = SSLCert(
   key_DER, key_DER_len
 );
 
-#define SD_CS 7
-#define SD_MOSI 6
-#define SD_MISO 5
-#define SD_SCK 4
+struct Config {
+    String ssid = "ESP32-AccessPoint";
+    String password = "";
+    bool logsEnabled = false;
+};
 
-HTTPSServer secureServer(&cert);
-HTTPServer insecureServer;
-DNSServer dnsServer;
-bool sdCardAttached = true;
-
-String ssid = "ESP32-AccessPoint";
-String password = "";
-
-bool Logs = false;
-
-// Web server
-struct HostMapping {
+struct HostRoute {
     String domain;
-    String folder;
+    String directory;
 };
-std::vector<HostMapping> hostMappings;
 
-// Pages emulation
-struct PageMapping {
-    String page;
-    int status;
-    String mimeType;
-    String filePath;
+struct PageEmulation {
+    String url;
+    int statusCode;
+    String contentType;
+    String response;
 };
-std::vector<PageMapping> pageMappings;
 
-const char style[] PROGMEM =
-  "body{font-family:sans-serif;}"
-  "a{text-decoration:none}"
-  "button{margin:0;}"
-  ".header{font-size:16px;}"
-  ".controls{font-size:16px;padding:8px 0;border-bottom:1px solid grey;}"
-  ".table{display:flex;flex-direction:column;margin-top:4px;max-width:540px;}"
-  ".row{display:flex;align-items:center;gap:1em;padding:.5em;white-space:nowrap;overflow:auto}"
-  ".row:nth-child(odd){background:#eee}"
-  ".icon{width:24px;height:24px}"
-  ".name{flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
-  ".actions{display:flex;gap:.5em}";
+DNSServer dnsServer;
+HTTPServer httpServer;
+HTTPSServer httpsServer(&cert);
 
-void logRequest(const String &protocol, const String &host, const String &request, const String &method, const String &userAgent, const String &body) {
-    File logFile = SD.open("/Logs.txt", FILE_APPEND);
-    if (logFile) {
-        logFile.print("Host: " + host + ", Method: " + method + ", Uptime: " + String(millis()) + "\n");
-        logFile.print("URL: " + protocol + host + request + "\n");
-        logFile.print("User-Agent: " + userAgent + "\n");
-        if (body.length() > 0)
-            logFile.print("Body:\n" + body + "\n");
-		logFile.print("\n");
-        logFile.close();
+Config config;
+std::vector<HostRoute> hostRoutes;
+std::vector<PageEmulation> pageEmulations;
+bool sdReady = false;
+
+// CSS
+const char CSS[] PROGMEM = R"(
+body{font-family:Arial,sans-serif;margin:10px;background:#f5f5f5}
+a{color:#0066cc;text-decoration:none}
+button{padding:8px 16px;margin:2px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer}
+button:hover{background:#45a049}
+.controls{background:white;padding:15px;margin:10px 0;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,0.1)}
+.table{background:white;margin:10px 0;border:1px solid #d3d3d3;border-radius:5px;box-shadow:0 2px 4px rgba(0,0,0,0.1)}
+.row{display:flex;align-items:center;padding:10px 6px;border-bottom:1px solid #eee}
+.row:first-child{border-top:none;}
+.row:hover{background:#f9f9f9}
+.row:last-child{border-bottom:none}
+.row:nth-child(odd){background:#eee}
+.name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.size{width:100px;text-align:right;color:#666}
+.actions{width:50px;text-align:right}
+)";
+
+String formatBytes(uint64_t bytes) {
+    if (bytes < 1024) return String(bytes) + " B";
+    if (bytes < 1048576) return String(bytes / 1024.0, 1) + " KB";
+    if (bytes < 1073741824) return String(bytes / 1048576.0, 1) + " MB";
+    return String(bytes / 1073741824.0, 2) + " GB";
+}
+
+
+// URL decode (UTF-8)
+String urlDecode(String str) {
+    String decoded = "";
+    char a, b;
+    for (size_t i = 0; i < str.length(); i++) {
+        if (str[i] == '%') {
+            if (i + 2 < str.length()) {
+                a = str[i + 1];
+                b = str[i + 2];
+                if (isxdigit(a) && isxdigit(b)) {
+                    if (a >= 'a') a -= 'a' - 'A';
+                    if (a >= 'A') a -= ('A' - 10);
+                    else a -= '0';
+                    if (b >= 'a') b -= 'a' - 'A';
+                    if (b >= 'A') b -= ('A' - 10);
+                    else b -= '0';
+                    decoded += char(16 * a + b);
+                    i += 2;
+                    continue;
+                }
+            }
+        } else if (str[i] == '+') {
+            decoded += ' ';
+            continue;
+        }
+        decoded += str[i];
     }
+	decoded.replace("+", " ");
+	decoded.replace("%20", " ");
+    return decoded;
+}
+
+String urlEncode(String str) {
+    const char *hex = "0123456789ABCDEF";
+    String encoded = "";
+    for (size_t i = 0; i < str.length(); i++) {
+        char c = str[i];
+        if (('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || 
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += c;
+        } else if (c == ' ') {
+            encoded += '+';
+        } else {
+            encoded += '%';
+            encoded += hex[(c >> 4) & 15];
+            encoded += hex[c & 15];
+        }
+    }
+    return encoded;
+}
+
+String normalizePath(String path) {
+    path.trim();
+    while (path.indexOf("//") != -1) path.replace("//", "/");
+    if (path.length() > 1 && path.endsWith("/")) {
+        path.remove(path.length() - 1);
+    }
+    if (!path.startsWith("/")) path = "/" + path;
+    return path;
+}
+
+bool isSafePath(const String& path) {
+    return path.indexOf("..") == -1;
 }
 
 void loadConfig() {
-    File f = SD.open("/Setup.ini");
-    if (!f) return;
-    while (f.available()) {
-        String line = f.readStringUntil('\n');
+    File file = SD.open("/Setup.ini");
+    if (!file) return;
+
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
         line.trim();
         int sep = line.indexOf('=');
         if (sep > 0) {
             String key = line.substring(0, sep);
-            String val = line.substring(sep + 1);
-            key.trim(); val.trim();
-            if (key == "AP_SSID")
-                ssid = val;
-            else if (key == "AP_PASSWORD")
-                password = val;
-            else if (key == "ENABLE_LOGS")
-                Logs = val == "1";
-        }
-    }
-    f.close();
-}
-
-void loadHosts() {
-    File file = SD.open("/Hosts.txt");
-    if (!file) return;
-    while (file.available()) {
-        String line = file.readStringUntil('\n');
-        line.trim();
-        if (line.length() == 0) continue;
-        int spaceIndex = line.indexOf(' ');
-        if (spaceIndex > 0) {
-            String domain = line.substring(0, spaceIndex);
-            String folder = line.substring(spaceIndex + 1);
-            folder.trim();
+            String value = line.substring(sep + 1);
+            key.trim();
+            value.trim();
             
-            hostMappings.push_back({domain, folder});
+            if (key == "AP_SSID")
+				config.ssid = value;
+            else if (key == "AP_PASSWORD")
+				config.password = value;
+            else if (key == "ENABLE_LOGS")
+				config.logsEnabled = (value == "1");
         }
     }
     file.close();
 }
 
-void loadPagesEmulation() {
+void loadHosts() {
+    File file = SD.open("/Hosts.txt");
+    if (!file) return;
+
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) continue;
+        
+        int space = line.indexOf(' ');
+        if (space > 0) {
+            HostRoute route;
+            route.domain = line.substring(0, space);
+            route.directory = line.substring(space + 1);
+            route.directory.trim();
+			
+            hostRoutes.push_back(route);
+        }
+    }
+    file.close();
+}
+
+void loadEmulation() {
     File file = SD.open("/Emulation.txt");
     if (!file) return;
 
@@ -239,246 +311,212 @@ void loadPagesEmulation() {
         line.trim();
         if (line.length() == 0) continue;
 
-        int first = line.indexOf('|');
-        if (first < 0) continue;
-        int second = line.indexOf('|', first + 1);
-        if (second < 0) continue;
-        int third = line.indexOf('|', second + 1);
-        if (third < 0) continue;
+        int firstPos = line.indexOf('|');
+        if (firstPos < 0) continue;
+        int secondPos = line.indexOf('|', firstPos + 1);
+        if (secondPos < 0) continue;
+        int thirdPos = line.indexOf('|', secondPos + 1);
+        if (thirdPos < 0) continue;
 
-        String page = line.substring(0, first);
-		page.trim();
-        String statusStr = line.substring(first + 1, second);
-		statusStr.trim();
-        String MIMEType = line.substring(second + 1, third);
-		MIMEType.trim();
-        String filePath = line.substring(third + 1);
-		filePath.trim();
-
-        pageMappings.push_back({page, statusStr.toInt(), MIMEType, filePath});
+        PageEmulation pageEmu;
+        pageEmu.url = line.substring(0, firstPos);
+        pageEmu.statusCode = line.substring(firstPos + 1, secondPos).toInt();
+        pageEmu.contentType = line.substring(secondPos + 1, thirdPos);
+        pageEmu.response = line.substring(thirdPos + 1);
+        
+        pageEmu.url.trim();
+        pageEmu.contentType.trim();
+        pageEmu.response.trim();
+        
+        pageEmulations.push_back(pageEmu);
     }
-
     file.close();
 }
 
-String getFolderForHost(const String &host) {
-    for (const auto &mapping : hostMappings) {
-        if (host.equalsIgnoreCase(mapping.domain))
-            return mapping.folder;
-    }
-    return "";
-}
-
-String bytesToSize(uint64_t bytes){ // size_t
-	if (bytes < 1024)
-		return String(bytes) + " B";
-	else if (bytes < (1048576)) // 1024 * 1024
-		return String(bytes / 1024.0) + " KB";
-	else if(bytes < (1073741824)) // 1024 * 1024 * 1024
-		return String(bytes / 1048576.0) + " MB"; // 1024.0 / 1024.0
-	else 
-		return String(bytes / 1073741824.0) + " GB"; // 1024.0 / 1024.0 / 1024.0
-}
-
-// https://circuits4you.com/2019/03/21/esp8266-url-encode-decode-example/
-String urlEncode(String str)
-{
-    String encodedString="";
-    char c;
-    char code0;
-    char code1;
-    char code2;
-    for (int i =0; i < str.length(); i++){
-      c=str.charAt(i);
-      if (c == ' '){
-        encodedString+= '+';
-      } else if (isalnum(c)){
-        encodedString+=c;
-      } else{
-        code1=(c & 0xf)+'0';
-        if ((c & 0xf) >9){
-            code1=(c & 0xf) - 10 + 'A';
-        }
-        c=(c>>4)&0xf;
-        code0=c+'0';
-        if (c > 9){
-            code0=c - 10 + 'A';
-        }
-        code2='\0';
-        encodedString+='%';
-        encodedString+=code0;
-        encodedString+=code1;
-        //encodedString+=code2;
-      }
-      yield();
-    }
-    return encodedString;
+void logRequest(const String& protocol, const String& host, const String& path, 
+                const String& method, const String& userAgent, const String& body) {
+    File log = SD.open("/Logs.txt", FILE_APPEND);
+    if (!log) return;
     
+	log.println("Uptime: " + String(millis()));
+	log.println("URL: " + protocol + host + path);
+    log.println("Method: " + method);
+    log.println("User-Agent: " + userAgent);
+    if (body.length() > 0)
+        log.println("Body: " + body);
+
+    log.println();
+    log.close();
 }
 
-unsigned char h2int(char c)
-{
-    if (c >= '0' && c <='9'){
-        return((unsigned char)c - '0');
-    }
-    if (c >= 'a' && c <='f'){
-        return((unsigned char)c - 'a' + 10);
-    }
-    if (c >= 'A' && c <='F'){
-        return((unsigned char)c - 'A' + 10);
-    }
-    return(0);
+String getMimeType(const String& origPath) {
+	String path = origPath;
+	path.toLowerCase();
+    if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html";
+    if (path.endsWith(".css")) return "text/css";
+    if (path.endsWith(".js")) return "application/javascript";
+    if (path.endsWith(".json")) return "application/json";
+    if (path.endsWith(".xml")) return "text/xml";
+    if (path.endsWith(".txt") || path.endsWith(".ini")) return "text/plain";
+    if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+	if (path.endsWith(".ico")) return "image/x-icon";
+    if (path.endsWith(".png")) return "image/png";
+    if (path.endsWith(".gif")) return "image/gif";
+    if (path.endsWith(".svg")) return "image/svg+xml";
+    if (path.endsWith(".webp")) return "image/webp";
+    if (path.endsWith(".mp3")) return "audio/mpeg";
+	if (path.endsWith(".wav")) return "audio/wav";
+	if (path.endsWith(".ogg")) return "audio/ogg";
+    if (path.endsWith(".mp4")) return "video/mp4";
+	if (path.endsWith(".webm")) return "video/webm";
+    if (path.endsWith(".pdf")) return "application/pdf";
+	if (path.endsWith(".manifest")) return "text/cache-manifest";
+    return "application/octet-stream";
 }
 
-String urlDecode(String str)
-{
-    String encodedString="";
-    char c;
-    char code0;
-    char code1;
-    for (int i =0; i < str.length(); i++){
-        c=str.charAt(i);
-      if (c == '+'){
-        encodedString+=' ';  
-      }else if (c == '%') {
-        i++;
-        code0=str.charAt(i);
-        i++;
-        code1=str.charAt(i);
-        c = (h2int(code0) << 4) | h2int(code1);
-        encodedString+=c;
-      } else{
-        
-        encodedString+=c;  
-      }
-      
-      yield();
-    }
+void deleteRecursive(const String& path) {
+    File dir = SD.open(path);
+    if (!dir) return;
     
-   return encodedString;
+    if (dir.isDirectory()) {
+        File entry = dir.openNextFile();
+        while (entry) {
+            String entryPath = path + "/" + String(entry.name());
+            if (entry.isDirectory()) {
+                entry.close();
+                deleteRecursive(entryPath); 
+            } else {
+                entry.close();
+                SD.remove(entryPath);
+            }
+            entry = dir.openNextFile();
+        }
+        dir.close();
+        SD.rmdir(path);
+    } else {
+        dir.close();
+        SD.remove(path);
+    }
 }
 
-void folderList(fs::FS &fs, const char *folderName, HTTPResponse *res, String request) {
-	String folderNameStr(folderName);
-	res->setStatusCode(200);
-	res->setHeader("Content-Type", "text/html");
-    res->println("<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
-    res->print("<title>Index of " + folderNameStr + "</title><style>");
-    res->print(style);
-    res->println("</style></head><body><h2>Index of " + folderNameStr + "</h2><hr>");
+void sendError(HTTPResponse* res, int code, const String& msg) {
+    res->setStatusCode(code);
+    res->setHeader("Content-Type", "text/html; charset=utf-8");
+    res->println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
+    res->println("<meta name='viewport' content='width=device-width'>");
+    res->println("<title>Error " + String(code) + "</title>");
+    res->println("<style>" + String(CSS) + "</style></head><body>");
+    res->println("<h1>Error " + String(code) + "</h1>");
+    res->println("<p>" + msg + "</p>");
+    res->println("</body></html>");
+}
 
-    File root = fs.open(folderName);
-    if (!root || !root.isDirectory()) {
-		//res->println("<p>The requested URL \"" + url + "\" is not a directory.<br>Path: \"" + folderNameStr + "\".</p></body></html>");
-		res->println("<p>The requested URL \"" + request + "\" is either missing or not a directory on the SD card.<br>Requested path: \"" + folderNameStr + "\".</p></body></html>");
+String jsEncode(const String& Value) {
+    String s = Value;
+    s.replace("\\", "\\\\");
+    s.replace("\"", "\\\"");
+    s.replace("\n", "\\n");
+    return s;
+}
+
+String getFileIcon(const String& path) {
+    String lower = path;
+    lower.toLowerCase();
+
+    if (lower.endsWith(".html") || lower.endsWith(".htm")) return "🌐";
+    if (lower.endsWith(".css")) return "🎨";
+    if (lower.endsWith(".js")) return "🟨";
+    if (lower.endsWith(".json")) return "📄";
+    if (lower.endsWith(".xml")) return "📄";
+    if (lower.endsWith(".txt") || lower.endsWith(".ini")) return "📄";
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".gif") || lower.endsWith(".webp")) return "🖼️";
+    if (lower.endsWith(".ico") || lower.endsWith(".svg")) return "🔖";
+    if (lower.endsWith(".mp3") || lower.endsWith(".wav") || lower.endsWith(".ogg")) return "🎵";
+    if (lower.endsWith(".mp4") || lower.endsWith(".webm")) return "🎬";
+    if (lower.endsWith(".pdf")) return "📕";
+    if (lower.endsWith(".manifest")) return "📄";
+    return "📄";
+}
+
+void sendDirListing(HTTPResponse* res, const String& fsPath, const String& urlPath) {
+    File dir = SD.open(fsPath);
+    if (!dir || !dir.isDirectory()) {
+        sendError(res, 404, "Directory not found");
         return;
     }
-	
-    String clientPath = String(folderName);
-    if (!clientPath.endsWith("/"))
-        clientPath += "/";
-	
-	//res->println(request);
-	
-	res->println("<div class='controls'><button onclick=\"let name=prompt('New folder:'); if(name && name.trim() != '') document.location='/?mkdir=" + urlEncode(clientPath) + "' + encodeURI(name) + '&url=' + '" + request + "';\">New folder</button>");
-	res->println(
-	  "<form style='display:inline-block; vertical-align: middle; margin: 0;' method='POST' enctype='multipart/form-data' action='/upload=" + urlEncode(clientPath + "&url=" + request) + "'>"
-	  "<input type='file' name='upload' id='upload' style='display:none' onchange='this.form.submit()'>"
-	  "<label for='upload' id='uploadLabel' style='display:none'></label>"
-	  "<button type='button' onclick='document.getElementById(\"uploadLabel\").click()'>Upload</button>"
-	  "</form>"
-	);
 
-    res->println("<div class='table'>");
-    File file = root.openNextFile();
-    while (file) {
-        res->print("<div class='row'>");
-        res->print("<div class='name'><a href=\"" + request);
-        res->print(file.name());
-        if (file.isDirectory())
-            res->print("/");
-        res->print("\">");
-        res->print(file.name());
-        res->print("</a></div><div class='date'>");
-		if (!file.isDirectory())
-			res->print(bytesToSize(file.size()));
-		String deletePath = clientPath + file.name();
-		res->print("</div><div class='actions'><a href=\"/?delete=" + urlEncode(deletePath + "&url=" + request) + "\" ");
-		res->print("onclick=\"return confirm('Remove &quot;");
-		res->print(file.name());
-		res->print("&quot;?');\">❌</a></div></div>");
-        file = root.openNextFile();
-    }
-    res->println("</div></body></html>");
-}
+    res->setStatusCode(200);
+    res->setHeader("Content-Type", "text/html; charset=utf-8");
+    
+    res->println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
+    res->println("<meta name='viewport' content='width=device-width'>");
+    res->println("<title>Index of " + urlPath + "</title>");
+    res->println("<style>" + String(CSS) + "</style></head><body>");
+    res->println("<h2>Index of " + urlPath + "</h2>");
 
-String getContentType(const String path) {
-	if (path.endsWith(".html") || path.endsWith(".htm")) return "text/html";
-	else if (path.endsWith(".css")) return "text/css";
-	else if (path.endsWith(".js")) return "application/javascript";
-	else if (path.endsWith(".json")) return "application/json";
-	else if (path.endsWith(".xml")) return "text/xml";
-	else if (path.endsWith(".txt") || path.endsWith(".ini")) return "text/plain";
-	else if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
-	else if (path.endsWith(".ico")) return "image/x-icon";
-	else if (path.endsWith(".png")) return "image/png";
-	else if (path.endsWith(".gif")) return "image/gif";
-	else if (path.endsWith(".svg")) return "image/svg+xml";
-	else if (path.endsWith(".webp")) return "image/webp";
-	else if (path.endsWith(".mp3")) return "audio/mpeg";
-	else if (path.endsWith(".wav")) return "audio/wav";
-	else if (path.endsWith(".ogg")) return "audio/ogg";
-	else if (path.endsWith(".mp4")) return "video/mp4";
-	else if (path.endsWith(".webm")) return "video/webm";
-	else if (path.endsWith(".pdf")) return "application/pdf";
-	else if (path.endsWith(".manifest")) return "text/cache-manifest";
-	else return "application/octet-stream"; // contentType = "text/html"
-}
+    // Control buttons / Кнопки управления
+    res->println("<div class='controls'>");
+	res->println("<button onclick='history.back()'><</button>");
+    res->print("<button onclick=\"var n=prompt('Folder name:');");
+    res->print("if(n)location='/?mkdir=" + urlEncode(fsPath) + "&name='+encodeURIComponent(n)");
+    res->println("+'&back=" + urlEncode(urlPath) + "';\">New Folder</button>");
+    
+    res->print("<form method='POST' enctype='multipart/form-data' ");
+    res->print("action='/upload?path=" + urlEncode(fsPath));
+    res->println("&back=" + urlEncode(urlPath) + "' style='display:inline'>");
+    res->println("<input type='file' name='file' id='f' style='display:none' onchange='this.form.submit()'>");
+    res->println("<button type='button' onclick='document.getElementById(\"f\").click()'>Upload</button>");
+    res->println("</form></div>");
 
-void sendFile(HTTPResponse *res, int resStatus, String contentType, String pathOrValue, String request) {
-	// If the emulation simply returns a string / Если при эмуляции просто отдается строка
-    if (pathOrValue.startsWith("\"")) {
-		res->setStatusCode(resStatus);
-		res->setHeader("Content-Type", contentType.c_str());
-		pathOrValue = pathOrValue.substring(1, pathOrValue.length() - 1);
-		pathOrValue.replace("\\n", "\n");
-		res->println(pathOrValue);
-		return;
+    // List of files / Список файлов
+    
+    
+    File entry = dir.openNextFile();
+	if (entry) {
+		res->println("<div class='table'>");
+		while (entry) {
+			String name = String(entry.name());
+			bool isDir = entry.isDirectory();
+			
+			String linkUrl = urlPath;
+			if (!linkUrl.endsWith("/")) linkUrl += "/";
+			linkUrl += urlEncode(name);
+			if (isDir) linkUrl += "/";
+
+			String delPath = fsPath;
+			if (!delPath.endsWith("/")) delPath += "/";
+			delPath += name;
+
+			res->println("<div class='row'>");
+			res->print("<div class='name'><a href='" + linkUrl + "'>");
+			res->print(isDir ? "📁 " : getFileIcon(name) + " ");
+			res->println(name + "</a></div>");
+			res->println("<div class='size'>" + (isDir ? "" : formatBytes(entry.size())) + "</div>");
+			res->print("<div class='actions'><a href='/?delete=" + urlEncode(delPath));
+			res->print("&back=" + urlEncode(urlPath));
+			res->print("' onclick='return confirm(\"Delete \"" + jsEncode(name) + "\"?\")'>❌</a></div>");
+			res->println("</div>");
+			
+			entry = dir.openNextFile();
+		}
+		res->println("</div>");
 	}
-	
-	// Normalizing paths / Приводим пути в порядок
-	while (pathOrValue.indexOf("//") != -1)
-        pathOrValue.replace("//", "/");
-	if (pathOrValue != "/" && pathOrValue.endsWith("/")) // Folders are recognized only without the last slash (!file) / Папки распознаются только без последнего слеша (!file)
-		pathOrValue.remove(pathOrValue.length() - 1); 
+	res->println("</body></html>");
+    dir.close();
+}
 
-	
-    File file = SD.open(pathOrValue);
-	
-	// If there is nothing / Если ничего нет
+void sendFile(HTTPResponse* res, const String& path) {
+    File file = SD.open(path);
     if (!file) {
-		res->setStatusCode(404);
-		res->setHeader("Content-Type", "text/html");
-        //res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>404 Not Found</title></head><body><h1>Not Found</h1><p>The requested URL was not found on this server.<br>Host: \"" + host + "\".<br>Path: \"" + pathOrValue + "\".</p></body></html>");
-        res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>404 Not Found</title></head><body><h1>Not Found</h1><p>The requested URL \"" + request + "\" was not found on this server.<br>Requested path: \"" + pathOrValue + "\".</p></body></html>");
+        sendError(res, 404, "File not found");
         return;
     }
 
-	// If folder / Если папка
-    if (file.isDirectory()) {
-		file.close();
-        folderList(SD, pathOrValue.c_str(), res, request);
-		return;
-    }
+    String mime = getMimeType(path);
+    res->setStatusCode(200);
+    res->setHeader("Content-Type", mime.c_str());
 
-	// If file / Если файл
-    if (contentType == "")
-		contentType = getContentType(pathOrValue);
-
-	res->setStatusCode(resStatus);
-	res->setHeader("Content-Type", contentType.c_str());
-
-    uint8_t buf[1024];
+    byte buf[1024];
     while (file.available()) {
         size_t len = file.read(buf, sizeof(buf));
         res->write(buf, len);
@@ -486,354 +524,404 @@ void sendFile(HTTPResponse *res, int resStatus, String contentType, String pathO
     file.close();
 }
 
-void deleteDirRecursively(const String &path) {
-    File dir = SD.open(path);
-    if (!dir || !dir.isDirectory()) {
-        dir.close();
-        return;
+void sendDebugPage(HTTPRequest* req, HTTPResponse* res, bool secure) {
+    res->setStatusCode(200);
+    res->setHeader("Content-Type", "text/html; charset=utf-8");
+    
+    res->println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
+    res->println("<meta name='viewport' content='width=device-width'>");
+    res->println("<title>ESP32 Server</title>");
+    res->println("<style>" + String(CSS) + "</style></head><body>");
+    
+    res->println("<h2>Hosts</h2><div class='table'>");
+    for (auto& host : hostRoutes) {
+        res->println("<div class='row'><div class='name'><a href='" + 
+                    String(secure ? "https://" : "http://") + host.domain + "/'>" + 
+                    host.domain + "</a></div><div>" + host.directory + "</div></div>");
+    }
+    res->println("</div>");
+
+    res->println("<h2>Emulation</h2><div class='table'>");
+    for (auto& pageEmu : pageEmulations) {
+        res->println("<div class='row'><div class='name'><a href=\"" + String(secure ? "https://" : "http://") + pageEmu.url + "\">" + pageEmu.url + "</a></div>" +
+					 "<div class='name'>" + pageEmu.response + "</div>" + 
+					 "<div onclick='alert(\"" + "Address: " + pageEmu.url + "\\n" +
+												"Content type: " + pageEmu.contentType + "\\n" +
+												"Status code: " + pageEmu.statusCode + "\\n" +
+												"Response: " + jsEncode(pageEmu.response) + "\")'>📝</div></div>");
+    }
+    res->println("</div>");
+
+    res->println("<a id='system'><h2>System</h2>");
+    res->println("<p>🌐 Protocol: " + String(secure ? "HTTPS" : "HTTP"));
+    res->println(" | <a href='" + String(secure ? "http://" : "https://") + WiFi.softAPIP().toString() + "'>Switch</a>");
+    res->println(" | <a href='" + String(secure ? "https://" : "http://") + String(req->getHeader("Host").c_str()) + "'>Refresh</a>");
+    res->println("</p>");
+    res->println("<p>🖥️ HOST: " + String(req->getHeader("Host").c_str()) + ", IP: " + WiFi.softAPIP().toString() + "</p>");
+    res->println("<p>🧠 CPU: " + String(ESP.getCpuFreqMHz()) + " MHz</p>");
+    res->println("<p>🗄️ RAM: " + formatBytes(ESP.getFreeHeap()) + " / " + formatBytes(ESP.getHeapSize()) + " (" + formatBytes(ESP.getHeapSize() - ESP.getFreeHeap()) + " free)</p></p>");
+    res->println("<p>💾 ROM: " + formatBytes(ESP.getSketchSize()) + " / " + formatBytes(ESP.getSketchSize() + ESP.getFreeSketchSpace()) + " (" + formatBytes(ESP.getFreeSketchSpace()) + " free)</p>");
+    
+    if (sdReady)
+        res->println("<p>💾 SD: " + formatBytes(SD.usedBytes()) + " / " + formatBytes(SD.totalBytes()) + " (" + formatBytes(SD.totalBytes() - SD.usedBytes()) + " free)</p>");
+	
+	float temp = temperatureRead();
+	res->println("<p>🌡️ Temperature: " + String(temp, 1) + " °C</p>");
+    
+    res->println("</body></html>");
+}
+
+bool handleMkdir(HTTPRequest* req, HTTPResponse* res, const String& query) {
+    if (query.indexOf("?mkdir=") == -1) return false;
+
+    // Parsing parameters / Парсим параметры
+    int pathStart = query.indexOf("?mkdir=") + 7;
+    int pathEnd = query.indexOf("&name=");
+    if (pathEnd == -1) return false;
+    
+    String basePath = urlDecode(query.substring(pathStart, pathEnd));
+    
+    int nameStart = pathEnd + 6;
+    int nameEnd = query.indexOf("&back=", nameStart);
+    if (nameEnd == -1) nameEnd = query.length();
+    
+    String folderName = urlDecode(query.substring(nameStart, nameEnd));
+    
+    int backStart = query.indexOf("&back=");
+    String backUrl = backStart != -1 ? urlDecode(query.substring(backStart + 6)) : "/";
+
+    // Make dir / Создаем папку
+    String newPath = basePath;
+    if (!newPath.endsWith("/")) newPath += "/";
+    newPath += folderName;
+    
+    if (isSafePath(newPath)) {
+        SD.mkdir(newPath);
     }
 
-    File entry = dir.openNextFile();
-    while (entry) {
-        String entryName = entry.name();
-        String filePath = path + "/" + entryName;
+    // Redirect / Редирект
+    res->setStatusCode(303);
+    res->setHeader("Location", backUrl.c_str());
+    return true;
+}
 
-        if (entry.isDirectory()) {
-            entry.close();  // Close before recursion / Закрываем перед рекурсией
-            deleteDirRecursively(filePath);
-            SD.rmdir(filePath);  // Delete the folder itself / Удаляем саму папку
-        } else {
-            entry.close();  // Close the file before deleting Закрываем файл перед удалением
-            SD.remove(filePath);
+bool handleDelete(HTTPRequest* req, HTTPResponse* res, const String& query) {
+    if (query.indexOf("?delete=") == -1) return false;
+
+    int pathStart = query.indexOf("?delete=") + 8;
+    int pathEnd = query.indexOf("&back=");
+    if (pathEnd == -1) pathEnd = query.length();
+    
+    String delPath = urlDecode(query.substring(pathStart, pathEnd));
+    
+    int backStart = query.indexOf("&back=");
+    String backUrl = backStart != -1 ? urlDecode(query.substring(backStart + 6)) : "/";
+
+    // Remove / Удаляем
+    delPath = normalizePath(delPath);
+    if (isSafePath(delPath) && delPath != "/") {
+        deleteRecursive(delPath);
+    }
+
+    // Redirect / Редирект
+    res->setStatusCode(303);
+    res->setHeader("Location", backUrl.c_str());
+    return true;
+}
+
+bool handleUpload(HTTPRequest* req, HTTPResponse* res, const String& query) {
+    if (req->getMethod() != "POST") return false;
+    if (query.indexOf("/upload?") == -1) return false;
+
+    // Parsing parameters / Парсим параметры
+    int pathStart = query.indexOf("path=") + 5;
+    int pathEnd = query.indexOf("&back=");
+    if (pathEnd == -1) pathEnd = query.length();
+    
+    String uploadPath = urlDecode(query.substring(pathStart, pathEnd));
+    if (!uploadPath.endsWith("/")) uploadPath += "/";
+    
+    int backStart = query.indexOf("&back=");
+    String backUrl = backStart != -1 ? urlDecode(query.substring(backStart + 6)) : "/";
+
+    // Upload file / Загружаем файл
+    HTTPMultipartBodyParser parser(req);
+    while (parser.nextField()) {
+        String filename = String(parser.getFieldFilename().c_str());
+        if (filename.length() == 0) continue;
+
+        // Clearing the file name / Очищаем имя файла
+        filename.replace("\\", "/");
+        int lastSlash = filename.lastIndexOf('/');
+        if (lastSlash != -1) {
+            filename = filename.substring(lastSlash + 1);
         }
 
-        entry = dir.openNextFile();  // Next file / Следующий файл
+        if (!isSafePath(filename)) continue;
+
+        String fullPath = uploadPath + filename;
+        File file = SD.open(fullPath, FILE_WRITE);
+        if (!file) continue;
+
+        byte buf[512];
+        while (!parser.endOfField()) {
+            size_t len = parser.read(buf, sizeof(buf));
+            file.write(buf, len);
+        }
+        file.close();
     }
 
-    dir.close();
-    SD.rmdir(path);  // We delete the already empty directory / Удаляем уже пустую директорию
+    // Redirect / Редирект
+    res->setStatusCode(303);
+    res->setHeader("Location", backUrl.c_str());
+    return true;
 }
 
-// https://github.com/bdash9/ESP32-FileServer-HTTP-HTTPS/blob/main/ESP32-File_server-AP-web-DEMO/ESP32-File_server-AP-web-DEMO.ino
-void handleUpload(HTTPRequest *req, HTTPResponse *res, String request)
-{
-	String pathUpload = request.substring(request.indexOf("/upload=") + 8);
-	
-	String basePath = "/";
-	int urlParamIndex = pathUpload.indexOf("&url=");
-	if (urlParamIndex != -1) {
-		basePath = pathUpload.substring(urlParamIndex + 5);
-		if (!basePath.startsWith("/")) basePath = "/" + basePath;
-		pathUpload = pathUpload.substring(0, urlParamIndex);
-	}
-
-	HTTPMultipartBodyParser *parser = new HTTPMultipartBodyParser(req);
-	while (parser->nextField()) {
-		String filename = parser->getFieldFilename().c_str();
-		if (filename.length() == 0) continue;
-
-		filename.replace("\\", "/");
-		while (filename.startsWith("/")) filename = filename.substring(1);
-		if (filename.indexOf("..") >= 0) continue;
-
-		File upFile = SD.open(pathUpload + filename, "w");
-		if (!upFile) continue;
-
-		while (!parser->endOfField()) {
-			byte buf[1024];
-			size_t readLength = parser->read(buf, sizeof(buf));
-			upFile.write(buf, readLength);
-		}
-		upFile.close();
-	}
-	delete parser;
-
-	res->setStatusCode(303); // No caching / Без кеширования
-	res->setStatusText("See Other");
-	basePath = urlEncode(basePath);
-	res->setHeader("Location", basePath.c_str());
-}
-
-String readRequestBody(HTTPRequest *req) {
-	int len = req->getContentLength();
-	String body = "";
-	if (len > 0) {
-		byte *buf = new byte[len + 1]; // используем byte вместо char
-		int readLen = req->readBytes(buf, len);
-		buf[readLen] = 0; // завершаем строку
-
-		body = String((char*)buf); // приводим к char* при создании строки
-		delete[] buf;
-	}
-	return body;
-}
-
-void handleClient(HTTPRequest * req, HTTPResponse * res) {
-	if (!sdCardAttached) {
-        res->setStatusCode(200);
-		res->setHeader("Content-Type", "text/html");
-        res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>SD card not found</title><style>");
-		res->print(style);
-		res->println("</style></head><body><h2>SD card not found</h2></body></html>");
+void handleRequest(HTTPRequest* req, HTTPResponse* res) {
+    if (!sdReady) {
+        sendError(res, 503, "SD card not available");
         return;
-	}
-	String protocol = String(req->isSecure() ? "https://" : "http://");
-	String method = String(req->getMethod().c_str());
-	String host = String(req->getHeader("Host").c_str());
-	String request = urlDecode(String(req->getRequestString().c_str()));
-	String userAgent = String(req->getHeader("User-Agent").c_str());
-	String body = "";
-	if (method == "POST" || method == "PUT")
-		body = readRequestBody(req);
-	unsigned long timeout = millis() + 1000;
+    }
 
-	host.trim();
-	request.trim();
+    // Receiving request data / Получаем данные запроса
+    bool secure = req->isSecure();
+    String method = String(req->getMethod().c_str());
+    String host = String(req->getHeader("Host").c_str());
+    String path = String(req->getRequestString().c_str());
+    String userAgent = String(req->getHeader("User-Agent").c_str());
 
-	if (host.length() == 0 || request.length() == 0) return;
-	while (request.indexOf("//") != -1) // We bring the requests in order site//file.txt -> site/file.txt / Приводим запросы в порядок site//file.txt -> site/file.txt
-		request.replace("//", "/");
-		
-	if (method == "POST" && request.startsWith("/upload")) {
-		handleUpload(req, res, request);
-		return;
-	}
-	
-	// Android WiFi activation skip
-	//if (host == "connectivitycheck.gstatic.com") {
-		//res->setStatusCode(404);
-		//return;
-	//}
-	
-    if (Logs)
-        logRequest(protocol, host, request, method, userAgent, body);
-	
-	// Create a folder / Создание папки
-	int mkDirIndex = request.indexOf("/?mkdir=");
-	if (mkDirIndex != -1) {
-		String newFolder = request.substring(mkDirIndex + 8);
-		String basePath = "/";
+    // Cleaning the host / Очищаем хост
+    int colon = host.indexOf(':');
+    if (colon != -1) host = host.substring(0, colon);
+    host.trim();
+    if (host.endsWith(".")) host.remove(host.length() - 1);
 
-		int urlParamIndex = newFolder.indexOf("&url=");
-		if (urlParamIndex != -1) {
-			basePath = newFolder.substring(urlParamIndex + 5);
-			if (!basePath.startsWith("/")) basePath = "/" + basePath;
-			newFolder = newFolder.substring(0, urlParamIndex);
-		}
-		
-		newFolder.trim();
-		//newFolder = urlDecode(newFolder);
+    // Reading the body for POST / Читаем body для POST
+    String body = "";
+    if (method == "POST" || method == "PUT") {
+        int len = req->getContentLength();
+        if (len > 0 && len < 8192) {
+            byte* buf = new byte[len + 1];
+            if (buf) {
+                int read = req->readBytes(buf, len);
+                buf[read] = 0;
+                body = String((char*)buf);
+                delete[] buf;
+            }
+        }
+    }
 
-		if (!SD.exists(newFolder))
-			SD.mkdir(newFolder);
-		
-		/*res->setStatusCode(404);
-		res->setHeader("Content-Type", "text/html");
-		res->println("\"" + basePath + "\"<br>" + "\"" + newFolder + "\"");*/
+	if (config.logsEnabled)
+		logRequest(secure ? "https://" : "http://", host, path, method, userAgent, body);
 
-		// Forwarding back / Переадресация обратно
-		basePath = urlEncode(basePath);
-		res->setHeader("Location", basePath.c_str());
-		res->setStatusCode(303);
-		res->setHeader("Content-Type", "text/html");
-		return;
-	}
-	
-	// Deleting / Удаление
-	int deleteIndex = request.indexOf("/?delete=");
-	if (deleteIndex != -1) {
-		String toDelete = request.substring(deleteIndex + 9);
-		String basePath = "/";
-		
-		int urlParamIndex = toDelete.indexOf("&url=");
-		if (urlParamIndex != -1) {
-			basePath = toDelete.substring(urlParamIndex + 5);
-			if (!basePath.startsWith("/")) basePath = "/" + basePath;
-			toDelete = toDelete.substring(0, urlParamIndex);
-		}
-		
-		toDelete.trim();
-		if (toDelete == "/") return;
-		if (toDelete.endsWith("/")) // Folders are recognized only without the "/" (!file) / Папки распознаются только без "/" (!file)
-			toDelete.remove(toDelete.length() - 1); 
+    // Processing actions / Обработка действий
+    if (handleMkdir(req, res, path)) return;
+    if (handleDelete(req, res, path)) return;
+    if (handleUpload(req, res, path)) return;
 
-		if (SD.exists(toDelete)) {
-			File f = SD.open(toDelete);
-			if (f) {
-				bool isDir = f.isDirectory();
-				f.close(); // Close before deleting / Закрываем перед удалением
+    // We decode the path only for routing / Декодируем путь только для роутинга
+    String decodedPath = path;
+    int questionMark = decodedPath.indexOf('?');
+    if (questionMark != -1) {
+        decodedPath = decodedPath.substring(0, questionMark);
+    }
+    decodedPath = urlDecode(decodedPath);
+    decodedPath = normalizePath(decodedPath);
 
-				if (isDir)
-					deleteDirRecursively(toDelete);
-				else
-					SD.remove(toDelete);
-			}
-		}
-		
-		/*res->setStatusCode(404);
-		res->setHeader("Content-Type", "text/html");
-		res->println("\"" + basePath + "\"<br>" + "\"" + toDelete + "\"");*/
-		
-		// Forwarding back / Переадресация обратно
-		//String location = String(req->isSecure() ? "https://" : "http://") + host + basePath;
-		basePath = urlEncode(basePath);
-		res->setHeader("Location", basePath.c_str()); //pathUpload.c_str()
-		res->setStatusCode(303);
-		res->setHeader("Content-Type", "text/html");
-		return;
-	}
-	
     // Page emulation
-    for (const auto &mapping : pageMappings)
-            if (mapping.page == host + request || (request == "/" && mapping.page == host)) { // For both files and the homepage / Как файлы, так и главная страница
-			if (mapping.filePath != "-")
-				sendFile(res, mapping.status, mapping.mimeType, mapping.filePath, "");
-			else {
-				res->setStatusCode(404);
-				res->setHeader("Content-Type", "text/html");
-				res->println("");
-				//req->abort ????
+    String fullUrl = host + decodedPath;
+    for (auto& e : pageEmulations) {
+        if (e.url == fullUrl || (decodedPath == "/" && e.url == host)) {
+            if (e.response == "-") {
+                res->setStatusCode(e.statusCode);
+                return;
+				
+            } else if (e.response.startsWith("/")) {
+				res->setStatusCode(e.statusCode);
+				res->setHeader("Content-Type", e.contentType.c_str());
+				sendFile(res, e.response);
+				return;
+				
+			} else {
+				String content = e.response;
+				if (content.startsWith("\"") && content.endsWith("\"")) {
+					content = content.substring(1, content.length() - 1);
+					content.replace("\\n", "\n");
+				}
+				
+				res->setStatusCode(e.statusCode);
+				res->setHeader("Content-Type", e.contentType.c_str());
+				res->println(content);
+				return;
 			}
-			
-			/*res->setStatusCode(404); // Debug
-			res->setHeader("Content-Type", "text/html");
-			res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>404 Not Found</title></head><body>");
-			
-			res->println("Page: " + mapping.page + "<br>");
-			res->println("Host: " + host + "<br>");
-			res->println("Host + Request: " + host + request + "<br>");
-			res->println("Status: " + String(mapping.status) + "<br>");
-			res->println("Type: " + mapping.mimeType + "<br>");
-			res->println("File: " + mapping.filePath + "<br>");
-			res->println("</body></html>");*/
-		
-            return;
         }
+    }
 
+    // Information page / Информационная страница
     if (host == WiFi.softAPIP().toString() || host == "i.me") {
-        res->setStatusCode(200);
-		res->setHeader("Content-Type", "text/html");
-        res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Sites</title><style>");
-		res->print(style);
-		res->println("</style></head><body><h2>Sites</h2><hr><div class='table'>");
-
-        for (const auto &mapping : hostMappings)
-			res->print("<div class='row'><div class='name'><a href=\"" + protocol + mapping.domain + "/\">" + mapping.domain + "</a>" + "</div></div>");
-		res->print("</div>");
-		
-		res->println("<h2>Emulation</h2><hr>");
-		res->print("<div class='table'>");
-		for (const auto &mapping : pageMappings) {
-			res->print("<div class='row'><div class='name'><a href=\"" + protocol + mapping.page + "\">" + mapping.page + "</a></div>");
-            res->print("<div class='filePath'>" + mapping.filePath + "</div><div class='mimeType'>" + mapping.mimeType + "</div></div>");
-		}
-		res->print("</div>");
-		
-		res->println("<h2>Debug</h2><hr>");
-		res->println("Host: \"" + host + "\"");
-		res->println("<br>Request: \"" + request + "\"");
-		res->println("<br>Protocol: " + String(req->isSecure() ? "HTTPS" : "HTTP") + ", go to <a href=\"" + String(req->isSecure() ? "http://" : "https://") + WiFi.softAPIP().toString() + "/\">HTTPS</a>.");
-		res->println("<h2>ESP32</h2><hr>");
-		//res->println("MAC address: " + WiFi.macAddress() + "<br>");
-		res->println("CPU frequency: " + String(ESP.getCpuFreqMHz()) + "MHz<br>");
-		res->println("Ram size: " + bytesToSize(ESP.getHeapSize()) + "<br>");
-		res->println("Free ram: " + bytesToSize(ESP.getFreeHeap()) + "<br>");
-		res->println("Max alloc ram: " + bytesToSize(ESP.getMaxAllocHeap()) + "<br>");
-		res->println("Sketch size: " + bytesToSize(ESP.getSketchSize()) + "<br>");
-		res->println("Free space available: " + bytesToSize(ESP.getFreeSketchSpace() - ESP.getSketchSize()) + "<br>");
-		if (sdCardAttached) {
-			res->println("SD card size: " + bytesToSize(SD.cardSize()));
-			res->println("<br>SD card used space: " + bytesToSize(SD.usedBytes()));
-			res->println("<br>SD card free space: " + bytesToSize(SD.totalBytes() - SD.usedBytes()));
-		} else
-			res->println("SD Card: detached");
-        res->println("</body></html>");
+        sendDebugPage(req, res, secure);
         return;
     }
 
-	// If Host is not found, then folder length is 0 / Если Host не найден, то folder length - 0
-    String hostFolder = getFolderForHost(host);
-    if (hostFolder.length() == 0) {
-        res->setStatusCode(404);
-		res->setHeader("Content-Type", "text/html");
-        res->println("<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>404 Not Found</title></head><body><h1>Not Found</h1><p>The requested host was not found on this server.</p>Host: \"" + host + "\".</body></html>");
-		//req->abort????
+    // Looking for a directory for the host / Ищем директорию для хоста
+    String hostDir = "";
+    for (auto& r : hostRoutes) {
+        if (host.equalsIgnoreCase(r.domain)) {
+            hostDir = r.directory;
+            break;
+        }
+    }
+
+    if (hostDir.length() == 0) {
+        sendError(res, 404, "Host not found: " + host);
         return;
     }
-	
-	if (request == "/" || request.length() == 0) {
-		// We search for "index.html", otherwise we output the file / folder / Ищем "index.html", иначе выводим файл / папку
-		File indexFile = SD.open(hostFolder + "index.html");
-        if (indexFile) {
-            indexFile.close();
-            sendFile(res, 200, "", hostFolder + "index.html", "");
-        } else
-			sendFile(res, 200, "", hostFolder, request);
-    } else
-		sendFile(res, 200, "", hostFolder + request, request);
-	return;
+
+    // Full path to the file / Полный путь к файлу
+    String fsPath = hostDir;
+    if (!fsPath.endsWith("/")) fsPath += "/";
+    
+    if (decodedPath != "/" && decodedPath.length() > 0) {
+        String p = decodedPath;
+        if (p.startsWith("/")) p = p.substring(1);
+        fsPath += p;
+    }
+
+    fsPath = normalizePath(fsPath);
+
+    if (!isSafePath(fsPath)) {
+        sendError(res, 400, "Invalid path");
+        return;
+    }
+
+    if (!SD.exists(fsPath)) {
+        sendError(res, 404, "Not found: " + decodedPath);
+        return;
+    }
+
+    File file = SD.open(fsPath);
+    if (!file) {
+        sendError(res, 500, "Cannot open");
+        return;
+    }
+
+    // If it's a folder, look for index.html or show the listing / Если папка - ищем index.html или показываем листинг
+    if (file.isDirectory()) {
+        file.close();
+        
+        String indexPath = fsPath;
+        if (!indexPath.endsWith("/")) indexPath += "/";
+        indexPath += "index.html";
+        
+        if (hostDir != "/" && SD.exists(indexPath)) {
+            sendFile(res, indexPath);
+        } else {
+            sendDirListing(res, fsPath, decodedPath);
+        }
+        return;
+    }
+
+    // If it's a file, give it / Если файл - отдаем
+    file.close();
+    sendFile(res, fsPath);
 }
 
-void handleHTTPClient(HTTPRequest * req, HTTPResponse * res) {
-	handleClient(req, res);
+bool initSD() {
+    SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+    delay(500);
+    
+    for (int i = 0; i < 3; i++) {
+        if (SD.begin(PIN_SD_CS)) return true;
+        delay(500);
+    }
+    return false;
 }
 
-void handleHTTPSClient(HTTPRequest * req, HTTPResponse * res) {
-	handleClient(req, res);
-}
+/*SSLCert* loadCertFromSD() {
+    if (SD.exists("/server.crt") && SD.exists("/server.key")) {
+        File crtFile = SD.open("/server.crt");
+        File keyFile = SD.open("/server.key");
+
+        if (crtFile && keyFile) {
+            size_t crtSize = crtFile.size();
+            size_t keySize = keyFile.size();
+
+            if (crtSize > 0 && keySize > 0 && crtSize <= 8192 && keySize <= 8192) {
+                uint8_t* crtBuf = new uint8_t[crtSize];
+                uint8_t* keyBuf = new uint8_t[keySize];
+
+                if (crtBuf && keyBuf) {
+                    crtFile.read(crtBuf, crtSize);
+                    keyFile.read(keyBuf, keySize);
+
+                    crtFile.close();
+                    keyFile.close();
+
+                    SSLCert* cert = new SSLCert(crtBuf, crtSize, keyBuf, keySize);
+
+                    delete[] crtBuf;
+                    delete[] keyBuf;
+
+                    return cert;
+                }
+
+                delete[] crtBuf;
+                delete[] keyBuf;
+            }
+
+            crtFile.close();
+            keyFile.close();
+        }
+    }
+
+    // Fallback to the embedded certificate / Фоллбек на встроенный сертификат
+    return new SSLCert(crt_DER, crt_DER_len, key_DER, key_DER_len);
+}*/
 
 void setup() {
-	//Serial.begin(115200); Not working ???
-	delay(1000); // Дайте время на стабилизацию
+    delay(1000);
 
-	SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-	delay(500); // Увеличьте задержку
-	
-	int sdAttempts = 0;
-    while (!SD.begin(SD_CS)) {
-        delay(1000);
-        sdAttempts++;
-        if (sdAttempts == 5)
-            break;
+    sdReady = initSD();
+    
+    if (sdReady) {
+        loadConfig();
+        loadHosts();
+        loadEmulation();
     }
+
+    // WiFi
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+    WiFi.disconnect(true, true);
+    delay(100);
+    WiFi.softAP(config.ssid.c_str(), config.password.c_str());
+
+    // DNS
+    dnsServer.start(53, "*", WiFi.softAPIP());
 	
-	if (sdAttempts > 4) {
-		sdCardAttached = false;
-		//return;
-	} else {
-		sdCardAttached = true;
-		delay(200);
-		loadConfig();
-		delay(50);
-		loadHosts();
-		delay(50);
-		loadPagesEmulation();
-	}
+	// HTTP / HTTPS
+    ResourceNode* handler = new ResourceNode("", "ANY", &handleRequest);
+    httpServer.setDefaultNode(handler);
+    httpServer.start();
 	
-	WiFi.persistent(false);
-	WiFi.setSleep(false);          // стабильность AP
-	WiFi.disconnect(true, true);
-	delay(100);
-	
-	WiFi.softAP(ssid.c_str(), password.c_str());
-	//WiFi.setTxPower(WIFI_POWER_8_5dBm); // Stable working?
-
-	IPAddress myIP = WiFi.softAPIP();
-	dnsServer.start(53, "*", myIP);
-
-	ResourceNode *anyHTTPGetHandler = new ResourceNode("", "ANY", &handleHTTPClient);
-	ResourceNode *anyHTTPSGetHandler = new ResourceNode("", "ANY", &handleHTTPSClient);
-
-	insecureServer.setDefaultNode(anyHTTPGetHandler);
-	secureServer.setDefaultNode(anyHTTPSGetHandler);
-
-	insecureServer.start();
-	secureServer.start();
+	ResourceNode* handler2 = new ResourceNode("", "ANY", &handleRequest);
+	httpsServer.setDefaultNode(handler2);
+	httpsServer.start();
+    
+	// Cert files
+    /*if (sdReady) {
+        //SSLCert* cert = loadCertFromSD();
+        //if (cert) {
+            httpsServer = new HTTPSServer(cert);
+            httpsServer->setDefaultNode(handler);
+            httpsServer->start();
+        //}
+    //}*/
 }
 
 void loop() {
-	dnsServer.processNextRequest();
-	secureServer.loop();
-	insecureServer.loop();
-	delay(1);
+    dnsServer.processNextRequest();
+    httpServer.loop();
+    httpsServer.loop();
+    delay(1);
 }
